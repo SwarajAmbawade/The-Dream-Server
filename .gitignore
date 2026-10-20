@@ -1,0 +1,9 @@
+node_modules/
+.env
+.env.example
+FIX-ASSET-LOADING.md
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
+.DS_Store
+SETUP_Guide_Personal_FUCK.md
