@@ -11,8 +11,8 @@
     "refresh-dream-art": "node scripts/refresh-dream-art.js"
   },
   "engines": {
-    "node": ">=20"
-  },
+  "node": "22.x"
+},
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^11.7.0",
