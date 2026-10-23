@@ -23,6 +23,7 @@
       actions += `<button class="btn buy" data-buy="${d.id}" ${d.owned||d.authorId===state.user.id?'disabled':''}>${d.owned?'Owned':d.authorId===state.user.id?'Yours':`Buy ${d.price} ◈`}</button>`;
       actions += `<button class="btn rent" data-rent="${d.id}" ${d.owned||d.rented||d.authorId===state.user.id?'disabled':''}>${d.rented?'Rented':`Rent ${d.rent}/wk`}</button>`;
     } else if(d.forSale) actions += `<span class="price">${d.price} ◈ / ${d.rent} ◈ weekly</span>`;
+    if(mode==='created' && d.authorId===state.user.id) actions += `<button class="btn delete-dream" data-delete-dream="${d.id}">Delete dream</button>`;
     if(mode==='mine' && d.owned) actions += '<span class="pill">OWNED</span>';
     if(mode==='mine' && d.rented) actions += '<span class="pill" style="background:var(--green)">RENTED</span>';
     const image=d.imageUrl||'';
@@ -38,7 +39,7 @@
       view.innerHTML=sectionHead('The dream marketplace','The most resonant dreams, ranked by the community.',`${top.length} LISTED`) + '<div class="note">Credits are a project currency, not real money. Buying records ownership in your account; rentals last seven days. Your own dreams cannot be purchased or rented by you.</div>'+(top.length?`<div class="grid">${top.map(d=>card(d,'market')).join('')}</div>`:empty('No listings yet','Share a dream and list it for sale or rent.'));
     } else if(state.tab==='mine'){
       const posted=all.filter(d=>d.authorId===state.user.id);const acquired=state.mine.filter(d=>d.owned||d.rented);
-      view.innerHTML=sectionHead('Your dream archive','Dreams you have created, collected or rented.')+`<h3>Dreams I posted</h3>${posted.length?`<div class="grid">${posted.map(d=>card(d)).join('')}</div>`:empty('Nothing created yet','Your first dream starts with a story.')}<h3 style="margin-top:30px">Dreams I own or rent</h3>${acquired.length?`<div class="grid">${acquired.map(d=>card(d,'mine')).join('')}</div>`:empty('Your collection is empty','Visit the marketplace to collect a dream.')}`;
+      view.innerHTML=sectionHead('Your dream archive','Dreams you have created, collected or rented.')+`<h3>Dreams I posted</h3>${posted.length?`<div class="grid">${posted.map(d=>card(d,'created')).join('')}</div>`:empty('Nothing created yet','Your first dream starts with a story.')}<h3 style="margin-top:30px">Dreams I own or rent</h3>${acquired.length?`<div class="grid">${acquired.map(d=>card(d,'mine')).join('')}</div>`:empty('Your collection is empty','Visit the marketplace to collect a dream.')}`;
     } else if(state.tab==='ai'){
       const dreams=all.filter(d=>d.ai);
       view.innerHTML=sectionHead('Unclaimed dreams','Dreams nobody remembers creating. Their origin is the mystery.',`${dreams.length} UNKNOWN`) + '<div class="note">The server can create a new fictional dream. If image generation is configured, it attempts to paint it using the image API; otherwise, procedural dream art is used.</div><p style="margin:0 0 18px"><button class="btn primary" id="generate-ai">☾ Let the server dream</button></p>'+(dreams.length?`<div class="grid">${dreams.map(d=>card(d,'market')).join('')}</div>`:empty('The server is quiet','Ask it to dream.'));
@@ -266,6 +267,19 @@
     $('#modal').classList.remove('hidden');renderScene();
   }
   function bindCards(){
+    $$('[data-delete-dream]').forEach(b=>b.onclick=async()=>{
+      const id=Number(b.dataset.deleteDream);
+      const dream=state.dreams.find(d=>d.id===id);
+      if(!confirm(`Delete "${dream?.title || 'this dream'}"? This cannot be undone.`))return;
+      b.disabled=true;
+      try{
+        const result=await api(`/dreams/${id}`,{method:'DELETE'});
+        await refresh();
+        state.tab='mine';
+        render();
+        toast(result.message||'Dream deleted.');
+      }catch(e){toast(e.message);b.disabled=false;}
+    });
     $$('[data-like]').forEach(b=>b.onclick=async()=>{b.disabled=true;try{await api(`/dreams/${b.dataset.like}/resonate`,{method:'POST',body:'{}'});await refresh();}catch(e){toast(e.message);}finally{b.disabled=false;}});
     $$('[data-buy]').forEach(b=>b.onclick=async()=>{if(!confirm('Buy this dream with credits?'))return;b.disabled=true;try{const r=await api(`/dreams/${b.dataset.buy}/buy`,{method:'POST',body:'{}'});await refresh();toast(`${r.message} Remaining credits: ${r.credits}.`);}catch(e){toast(e.message);b.disabled=false;}});
     $$('[data-rent]').forEach(b=>b.onclick=async()=>{if(!confirm('Rent this dream for seven days?'))return;b.disabled=true;try{const r=await api(`/dreams/${b.dataset.rent}/rent`,{method:'POST',body:'{}'});await refresh();toast(`${r.message} Remaining credits: ${r.credits}.`);}catch(e){toast(e.message);b.disabled=false;}});

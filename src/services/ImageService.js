@@ -37,6 +37,11 @@ class ImageService {
     const localImage = await ImageService.findCuratedAsset(title, story, mood);
     if (localImage) return localImage;
 
+    // Middle layer: automatically match the dream against artwork already in
+    // public/assets/dreams before making any network request.
+    const galleryAsset = await ImageService.findLocalGalleryAsset(title, story, mood);
+    if (galleryAsset) return galleryAsset;
+
     const curatedImage = await ImageService.findGalleryImage(title, story, mood);
     if (curatedImage) return curatedImage;
 
@@ -58,6 +63,66 @@ class ImageService {
       await fs.access(assetPath);
       return { url: `/assets/dreams/${filename}`, credit: 'Original artwork', license: 'Project-owned artwork', sourceUrl: null };
     } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Match a dream to existing local artwork by filename. This makes the curated
+   * gallery useful without requiring an exact-title JSON mapping and avoids
+   * Pixabay requests for dreams that already have a relevant local image.
+   */
+  static async findLocalGalleryAsset(title, story, mood) {
+    const directory = path.join(PROJECT_ROOT, 'public', 'assets', 'dreams');
+    const stopWords = new Set([
+      ...STOP_WORDS, 'a', 'an', 'and', 'are', 'at', 'be', 'by', 'for', 'i',
+      'in', 'is', 'it', 'me', 'my', 'of', 'on', 'or', 'the', 'to', 'was',
+      'we', 'you', 'your', 'playing', 'play', 'watching', 'watched', 'got',
+      'had', 'saw', 'see', 'seeing', 'went', 'walking', 'swimming', 'infinite',
+      'endless', 'recurring', 'surreal', 'lucid', 'peaceful', 'nightmare',
+    ]);
+    const aliases = {
+      desert: ['dessert', 'sand', 'dunes'], dessert: ['desert', 'sand', 'dunes'],
+      door: ['doors', 'portal', 'portals'], doors: ['door', 'portal', 'portals'],
+      scary: ['horror', 'nightmare', 'dark', 'shadow'], horror: ['scary', 'nightmare'],
+      lady: ['woman', 'girl', 'person'], woman: ['lady', 'girl'],
+      road: ['street', 'highway'], street: ['road', 'highway'],
+      dog: ['puppy', 'pet'], puppy: ['dog', 'pet'], garden: ['flowers', 'blossom', 'lavender'],
+      staircase: ['stairs', 'steps'], stairs: ['staircase', 'steps'],
+      ocean: ['sea', 'underwater', 'water'], water: ['ocean', 'underwater', 'sea'],
+      city: ['cityscape', 'buildings', 'urban'],
+    };
+    const tokenize = (value) => String(value || '').toLowerCase()
+      .normalize('NFKD').replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/)
+      .filter((word) => word && !stopWords.has(word));
+
+    try {
+      const entries = await fs.readdir(directory, { withFileTypes: true });
+      const files = entries.filter((entry) => entry.isFile() && /\.(?:png|jpe?g|webp)$/i.test(entry.name));
+      const dreamWords = new Set(tokenize(`${title || ''} ${story || ''} ${mood || ''}`));
+      const expandedWords = new Set(dreamWords);
+      for (const word of dreamWords) for (const alias of aliases[word] || []) expandedWords.add(alias);
+      if (!expandedWords.size) return null;
+
+      let best = null;
+      for (const entry of files) {
+        const stemWords = new Set(tokenize(path.basename(entry.name, path.extname(entry.name))));
+        let score = 0;
+        for (const word of stemWords) {
+          if (dreamWords.has(word)) score += 3;
+          else if (expandedWords.has(word)) score += 1;
+        }
+        // A local image should be a meaningful match, not merely share a generic word.
+        if (!best || score > best.score) best = { filename: entry.name, score };
+      }
+      if (!best || best.score < 3) return null;
+      console.log(`[images] Using local gallery artwork "${best.filename}" (match score ${best.score})`);
+      return {
+        url: `/assets/dreams/${encodeURIComponent(best.filename)}`,
+        credit: 'Original artwork', license: 'Project-owned artwork', sourceUrl: null,
+      };
+    } catch (error) {
+      if (error.code !== 'ENOENT') console.warn(`[images] Local gallery lookup failed: ${error.message}`);
       return null;
     }
   }
@@ -107,9 +172,10 @@ class ImageService {
         url.searchParams.set('key', apiKey);
         url.searchParams.set('q', query.slice(0, 100));
         url.searchParams.set('image_type', 'all');
+        url.searchParams.set('lang', 'en');
         url.searchParams.set('orientation', 'horizontal');
         url.searchParams.set('safesearch', 'true');
-        url.searchParams.set('per_page', '20');
+        url.searchParams.set('per_page', '50');
 
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -149,7 +215,7 @@ class ImageService {
 
     // Reject semantically weak results rather than showing an unrelated image.
     const relevance = ImageService.scorePixabayImage(hit, title, story, mood);
-    if (relevance < 2) {
+    if (relevance < 1) {
       console.log(`[images] Best Pixabay match scored too low (${relevance}); using local artwork.`);
       return null;
     }
@@ -183,59 +249,76 @@ class ImageService {
 
   static scorePixabayImage(image, title, story, mood) {
     const terms = ImageService.extractSceneTerms(title, story);
-    const description = `${image.tags || ''} ${image.type || ''}`.toLowerCase();
+    const description = ` ${String(image.tags || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ')} ${String(image.type || '').toLowerCase()} `;
     let score = 0;
     for (const term of terms) {
-      if (description.includes(term)) score += term.includes(' ') ? 3 : 2;
+      const normalized = term.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      if (normalized && description.includes(` ${normalized} `)) score += normalized.includes(' ') ? 4 : 3;
     }
     const moodWords = {
       Lucid: /surreal|dream|fantasy|sky|cloud|cinematic/,
       Peaceful: /peaceful|calm|mist|garden|soft|serene/,
       Surreal: /surreal|fantasy|dream|ethereal|impossible/,
       Recurring: /mysterious|fog|mist|dream|surreal/,
-      Nightmare: /dark|night|shadow|storm|gothic|eerie/,
+      Nightmare: /dark|night|shadow|storm|gothic|eerie|horror|scary/,
     };
     if (moodWords[mood]?.test(description)) score += 1;
     return score;
   }
 
+  /** Convert dream language into concrete, Pixabay-friendly scene concepts. */
   static extractSceneTerms(title, story) {
-    const text = `${title} ${story}`.toLowerCase();
+    const text = `${title || ''} ${story || ''}`.toLowerCase().replace(/[’‘]/g, "'");
     const groups = [
-      [/underwater|under water|beneath (?:the )?(?:sea|ocean)|deep blue ocean|undersea/.test(text), ['underwater', 'underwater city', 'ocean', 'sea', 'underwater ruins']],
-      [/city|cities|tower|towers|building|buildings|street/.test(text), ['city', 'cityscape', 'skyscraper', 'tower', 'architecture']],
-      [/moon|lunar/.test(text), ['moon', 'moonlight', 'night sky']],
-      [/stair|stairs|steps/.test(text), ['staircase', 'stairs', 'steps']],
-      [/train|railway|station/.test(text), ['train', 'railway', 'railroad']],
-      [/forest|tree|woods|garden/.test(text), ['forest', 'trees', 'garden']],
-      [/door|portal|gate/.test(text), ['door', 'portal', 'glowing door']],
-      [/book|library/.test(text), ['library', 'books']],
-      [/fly|flying|float|floating|sky/.test(text), ['flying', 'floating', 'sky', 'clouds']],
-      [/clock|chased|chase/.test(text), ['clock', 'surreal', 'dark']],
-      [/grandfather|grandmother|family|memory/.test(text), ['silhouette', 'memory', 'nostalgia']],
+      [/scary lady|scary woman|creepy woman|woman watching|lady watching|watching me|haunted woman|ghost woman/.test(text), ['woman', 'scary woman', 'horror', 'ghost', 'shadow', 'creepy']],
+      [/\b(lady|woman|female|girl)\b/.test(text), ['woman', 'girl', 'portrait', 'silhouette']],
+      [/\b(dessert|desert|dunes|sand|sahara)\b/.test(text), ['desert', 'sand dunes', 'dunes', 'sandstorm']],
+      [/infinite doors|endless doors|doors in|many doors|door after door/.test(text), ['doors', 'door', 'corridor', 'infinite hallway', 'portal']],
+      [/\bdoor|doors|portal|gate|entrance\b/.test(text), ['door', 'doors', 'portal', 'corridor', 'mysterious doorway']],
+      [/swimming|underwater|flooded|water on the road|road.*water|street.*water/.test(text), ['flooded road', 'underwater street', 'flooded street', 'swimming', 'water', 'road']],
+      [/\broad|street|highway|pavement\b/.test(text), ['road', 'empty road', 'street', 'highway']],
+      [/\bdog|puppy|pet\b/.test(text), ['dog', 'puppy', 'dog in garden', 'pet']],
+      [/\bgarden|graden|backyard|lawn|flowers|flowerbed\b/.test(text), ['garden', 'backyard', 'green garden', 'flowers', 'lawn']],
+      [/\b(city|cities|tower|towers|building|buildings|skyscraper)\b/.test(text), ['cityscape', 'skyscraper', 'tower', 'architecture']],
+      [/\bmoon|lunar|night sky\b/.test(text), ['moon', 'moonlight', 'night sky']],
+      [/\bstair|stairs|steps|staircase\b/.test(text), ['staircase', 'stairs', 'steps']],
+      [/\btrain|railway|station|subway\b/.test(text), ['train', 'railway', 'station']],
+      [/\bforest|tree|woods\b/.test(text), ['forest', 'trees', 'woods']],
+      [/\bbook|library\b/.test(text), ['library', 'books']],
+      [/\bfly|flying|float|floating|sky|clouds\b/.test(text), ['floating', 'sky', 'clouds']],
+      [/\bclock|chased|chase\b/.test(text), ['clock', 'dark', 'surreal']],
     ];
-    const specific = groups.filter(([matches]) => matches).flatMap(([, terms]) => terms).slice(0, 7);
-    const mood = /nightmare/.test(text) ? 'dark surreal' : 'surreal dream';
-    return specific.length ? specific : mood.split(' ');
+    const specific = groups.filter(([matches]) => matches).flatMap(([, terms]) => terms);
+    if (specific.length) return [...new Set(specific)];
+    const meaningful = text.split(/[^a-z0-9]+/).filter((word) => word.length > 3 && !STOP_WORDS.has(word));
+    return [...new Set(meaningful)].slice(0, 5).concat(['surreal']);
   }
 
-  /** One concise scene query. Do not issue a second fallback query to conserve quota. */
+  /** One short, concrete query gives Pixabay more useful matches than a long synonym list. */
   static buildSearchQuery(title, story, mood) {
     const terms = ImageService.extractSceneTerms(title, story);
-    const moodTerm = ({ Lucid: 'cinematic', Peaceful: 'peaceful', Surreal: 'surreal', Recurring: 'mysterious', Nightmare: 'dark' })[mood] || 'surreal';
-    return [...new Set([...terms.slice(0, 4), moodTerm])].join(' ').slice(0, 90);
+    const text = `${title || ''} ${story || ''}`.toLowerCase();
+    let queryTerms;
+    if (/scary lady|scary woman|creepy woman|woman watching|lady watching|watching me/.test(text)) queryTerms = ['scary woman', 'horror'];
+    else if (/infinite doors|endless doors|doors in|many doors|door after door/.test(text) && /dessert|desert|dunes|sand/.test(text)) queryTerms = ['desert doors', 'sand dunes'];
+    else if (/\b(dessert|desert|dunes|sand|sahara)\b/.test(text) && /\bdoor|doors|portal\b/.test(text)) queryTerms = ['desert door', 'sand dunes'];
+    else if (/swimming|underwater|flooded|water on the road|road.*water|street.*water/.test(text) && /\broad|street|highway\b/.test(text)) queryTerms = ['flooded road', 'underwater street'];
+    else if (/\bdog|puppy|pet\b/.test(text) && /\bgarden|graden|backyard|lawn\b/.test(text)) queryTerms = ['dog garden', 'dog outdoors'];
+    else queryTerms = terms.slice(0, 2);
+    // Avoid mood-only terms: they dilute the scene-specific query and reduce relevance.
+    return [...new Set(queryTerms)].join(' ').slice(0, 90);
   }
 
   static buildBroadSearchQuery(title, story, mood) {
     return ImageService.buildSearchQuery(title, story, mood);
   }
 
-  /** Rank Pixabay hits by overlap with dream title/story and mood. */
+  /** Rank Pixabay hits by scene-word overlap and use popularity only as a tie-breaker. */
   static selectPixabayImage(images, title, story, mood) {
     return images
       .filter((image) => image && image.id && image.webformatURL && image.pageURL)
       .map((image) => ({ image, score: ImageService.scorePixabayImage(image, title, story, mood) }))
-      .sort((a, b) => b.score - a.score)[0]?.image || null;
+      .sort((a, b) => b.score - a.score || (Number(b.image.likes) || 0) - (Number(a.image.likes) || 0))[0]?.image || null;
   }
 
   /**

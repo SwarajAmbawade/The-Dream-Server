@@ -56,6 +56,41 @@ router.post('/ai', async (req, res, next) => {
   }
 });
 
+// Delete only dreams created by the authenticated user.
+router.delete('/:id', (req, res, next) => {
+  try {
+    const dreamId = Number(req.params.id);
+    if (!Number.isSafeInteger(dreamId) || dreamId <= 0) {
+      return res.status(400).json({ error: 'Invalid dream ID.' });
+    }
+
+    const dream = db.prepare(
+      'SELECT id, author_id FROM dreams WHERE id = ?'
+    ).get(dreamId);
+
+    if (!dream) {
+      return res.status(404).json({ error: 'Dream not found.' });
+    }
+    if (dream.author_id !== req.user.id) {
+      return res.status(403).json({ error: 'You can only delete dreams you created.' });
+    }
+
+    const removeDream = db.transaction(() => {
+      // Preserve transaction history while detaching it from the deleted dream.
+      db.prepare('UPDATE transactions SET dream_id = NULL WHERE dream_id = ?').run(dreamId);
+      db.prepare('DELETE FROM purchases WHERE dream_id = ?').run(dreamId);
+      db.prepare('DELETE FROM rentals WHERE dream_id = ?').run(dreamId);
+      db.prepare('DELETE FROM resonances WHERE dream_id = ?').run(dreamId);
+      db.prepare('DELETE FROM dreams WHERE id = ? AND author_id = ?').run(dreamId, req.user.id);
+    });
+    removeDream();
+
+    return res.json({ message: 'Dream deleted successfully.', id: dreamId });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 router.post('/:id/resonate', (req, res, next) => {
   try {
     return res.json(MarketService.resonate(req.user.id, Number(req.params.id)));
